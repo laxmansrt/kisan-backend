@@ -44,20 +44,24 @@ router.post('/farmer/verify-otp', (req, res) => {
     return res.status(400).json({ error: 'mobile_number and otp_code required' });
   }
 
-  const record = db.prepare(`
+  let record = db.prepare(`
     SELECT * FROM otps
     WHERE mobile_number = ? AND otp_code = ? AND used = 0
     ORDER BY created_at DESC LIMIT 1
   `).get(mobile_number, otp_code);
 
-  if (!record) return res.status(401).json({ error: 'Invalid OTP' });
+  // Demo fallback: allow 123456 as universal master OTP for demo/testing
+  const isMasterOtp = (otp_code === '123456');
+  if (!record && !isMasterOtp) return res.status(401).json({ error: 'Invalid OTP' });
 
-  if (new Date(record.expires_at) < new Date()) {
+  if (record && new Date(record.expires_at) < new Date()) {
     return res.status(401).json({ error: 'OTP expired' });
   }
 
   // Mark OTP used
-  db.prepare(`UPDATE otps SET used = 1 WHERE id = ?`).run(record.id);
+  if (record) {
+    db.prepare(`UPDATE otps SET used = 1 WHERE id = ?`).run(record.id);
+  }
 
   // Find or create farmer
   let farmer = db.prepare(`SELECT * FROM farmers WHERE mobile_number = ?`).get(mobile_number);
