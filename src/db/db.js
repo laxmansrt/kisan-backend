@@ -2,7 +2,7 @@
 const mongoose = require('mongoose');
 require('dotenv').config();
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/sih26032';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://laxmanmegalamani5_db_user:3JSD4pBr96nysAD2@cluster0.hycb754.mongodb.net/sih26032?retryWrites=true&w=majority';
 
 let isConnected = false;
 

@@ -33,9 +33,11 @@ router.post('/farmer/request-otp', async (req, res, next) => {
 
     console.log(`🔑 OTP for ${mobile_number}: ${otp} (expires ${expiresAt.toISOString()})`);
 
-    // In dev mode or when Twilio is not configured, return OTP in response for demo/testing
+    // Return OTP in response whenever Twilio is not configured (works in both dev & cloud deployments)
     const response = { message: 'OTP sent', expires_in_minutes: 10 };
-    if (process.env.NODE_ENV !== 'production' || !process.env.TWILIO_ACCOUNT_SID) response.dev_otp = otp;
+    if (!process.env.TWILIO_ACCOUNT_SID) {
+      response.dev_otp = otp;
+    }
 
     res.json(response);
   } catch (err) {
@@ -57,34 +59,31 @@ router.post('/farmer/verify-otp', async (req, res, next) => {
       return res.status(400).json({ error: 'mobile_number and otp_code required' });
     }
 
-    // Support both with and without +91
-    const mobileVariants = [
-      cleanMobile,
-      cleanMobile.replace(/^\+91/, ''),
-      `+91${cleanMobile.replace(/^\+91/, '')}`,
-    ];
-
     const isMasterOtp = (cleanOtp === '123456');
 
-    let record = await Otp.findOne({
-      mobile_number: { $in: mobileVariants },
-      otp_code: cleanOtp,
-      used: false,
-    }).sort({ created_at: -1 });
+    if (!isMasterOtp) {
+      // Support both with and without +91
+      const mobileVariants = [
+        cleanMobile,
+        cleanMobile.replace(/^\+91/, ''),
+        `+91${cleanMobile.replace(/^\+91/, '')}`,
+      ];
 
-    if (!record && !isMasterOtp) {
-      // Check if there is an active OTP for this mobile number (any code) for friendly debugging
-      const anyOtp = await Otp.findOne({ mobile_number: { $in: mobileVariants }, used: false }).sort({ created_at: -1 });
-      const hint = anyOtp ? ` Expected: ${anyOtp.otp_code} or 123456` : ' (Use 123456 for demo)';
-      return res.status(401).json({ error: `Invalid OTP.${hint}` });
-    }
+      let record = await Otp.findOne({
+        mobile_number: { $in: mobileVariants },
+        otp_code: cleanOtp,
+        used: false,
+      }).sort({ created_at: -1 });
 
-    if (record && new Date(record.expires_at) < new Date() && !isMasterOtp) {
-      return res.status(401).json({ error: 'OTP expired' });
-    }
+      if (!record) {
+        return res.status(401).json({ error: 'Invalid OTP' });
+      }
 
-    // Mark OTP used
-    if (record) {
+      if (new Date(record.expires_at) < new Date()) {
+        return res.status(401).json({ error: 'OTP expired' });
+      }
+
+      // Mark OTP used
       record.used = true;
       await record.save();
     }
