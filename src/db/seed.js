@@ -1,20 +1,29 @@
 'use strict';
 /**
- * Database Seed Script
+ * Database Seed Script for MongoDB Atlas
  * ============================================================
  * Run: node src/db/seed.js
  *
  * Creates:
  *   - 2 Karnataka APMC centers with GPS coordinates
  *   - 2 officers (one per center)
- *   - Pre-built time slots (4/day × 14 days) for each center
+ *   - Pre-built time slots (4/day × 21 days) for each center
  *   - 80 farmer registrations with realistic status spread
  */
 
 require('dotenv').config();
 const bcrypt = require('bcryptjs');
-const db = require('./db');
-const { assignSlotInDb } = require('../scheduler/slotAssigner');
+const { connectDB } = require('./db');
+
+const Center = require('../models/Center');
+const Officer = require('../models/Officer');
+const Farmer = require('../models/Farmer');
+const Slot = require('../models/Slot');
+const CropRegistration = require('../models/CropRegistration');
+const Token = require('../models/Token');
+const Payment = require('../models/Payment');
+const Notification = require('../models/Notification');
+const Otp = require('../models/Otp');
 
 // ============================================================
 // Seed data definitions
@@ -79,8 +88,6 @@ const VILLAGES = [
   'Maski', 'Raichur North', 'Sirawar', 'Kallur', 'Deodurga',
 ];
 
-// Status distribution for demo data (out of 80 farmers)
-// 16 paid, 10 payment_processing, 14 procured, 16 at_center, 12 scheduled, 8 approved, 4 registered
 const STATUS_SPREAD = [
   ...Array(4).fill('registered'),
   ...Array(8).fill('approved'),
@@ -120,182 +127,161 @@ function dateOffset(days) {
 // ============================================================
 // Main seed function
 // ============================================================
-function seed() {
-  console.log('🌱 Starting seed...');
+async function seed() {
+  await connectDB();
+  console.log('🌱 Starting MongoDB seed...');
 
-  // Clear existing data
-  db.exec(`
-    DELETE FROM notification_log;
-    DELETE FROM payments;
-    DELETE FROM tokens;
-    DELETE FROM crop_registrations;
-    DELETE FROM slots;
-    DELETE FROM otps;
-    DELETE FROM officers;
-    DELETE FROM farmers;
-    DELETE FROM centers;
-  `);
-
-  // Reset auto-increment sequences
-  db.exec(`
-    DELETE FROM sqlite_sequence WHERE name IN (
-      'centers','officers','farmers','slots','crop_registrations','tokens','payments','notification_log'
-    );
-  `);
+  // Clear existing collections
+  await Promise.all([
+    Notification.deleteMany({}),
+    Payment.deleteMany({}),
+    Token.deleteMany({}),
+    CropRegistration.deleteMany({}),
+    Slot.deleteMany({}),
+    Otp.deleteMany({}),
+    Officer.deleteMany({}),
+    Farmer.deleteMany({}),
+    Center.deleteMany({}),
+  ]);
+  console.log('  ✓ Cleared existing collections');
 
   // ── 1. Centers ───────────────────────────────────────────
-  const insertCenter = db.prepare(`
-    INSERT INTO centers (name, location, latitude, longitude, daily_capacity_quintals, daily_farmer_capacity, address, contact_number)
-    VALUES (@name, @location, @latitude, @longitude, @daily_capacity_quintals, @daily_farmer_capacity, @address, @contact_number)
-  `);
-
-  const centerIds = [];
-  for (const c of CENTERS) {
-    const result = insertCenter.run(c);
-    centerIds.push(result.lastInsertRowid);
-    console.log(`  ✓ Center: ${c.name} (id=${result.lastInsertRowid})`);
+  const createdCenters = await Center.insertMany(CENTERS);
+  for (const c of createdCenters) {
+    console.log(`  ✓ Center: ${c.name} (_id=${c._id})`);
   }
 
   // ── 2. Officers ──────────────────────────────────────────
-  const insertOfficer = db.prepare(`
-    INSERT INTO officers (name, username, password_hash, center_id)
-    VALUES (@name, @username, @password_hash, @center_id)
-  `);
-
   for (const o of OFFICERS) {
     const hash = bcrypt.hashSync(o.password, 10);
-    insertOfficer.run({
+    await Officer.create({
       name: o.name,
       username: o.username,
       password_hash: hash,
-      center_id: centerIds[o.center_index],
+      center_id: createdCenters[o.center_index]._id,
     });
     console.log(`  ✓ Officer: ${o.username} / ${o.password}`);
   }
 
   // ── 3. Slots (4/day × 21 days for each center) ──────────
-  const insertSlot = db.prepare(`
-    INSERT OR IGNORE INTO slots (center_id, date, start_time, end_time, max_farmers)
-    VALUES (@center_id, @date, @start_time, @end_time, @max_farmers)
-  `);
-
-  const today = dateOffset(0);
-  for (const centerId of centerIds) {
-    const center = CENTERS[centerIds.indexOf(centerId)];
+  const slotsToCreate = [];
+  for (const center of createdCenters) {
     const maxPerSlot = Math.floor(center.daily_farmer_capacity / SLOT_TIMES.length);
     for (let d = -7; d <= 14; d++) {
       const date = dateOffset(d);
       for (const [start, end] of SLOT_TIMES) {
-        insertSlot.run({ center_id: centerId, date, start_time: start, end_time: end, max_farmers: maxPerSlot });
+        slotsToCreate.push({
+          center_id: center._id,
+          date,
+          start_time: start,
+          end_time: end,
+          max_farmers: maxPerSlot,
+          farmers_assigned_count: 0,
+          allocated_quintals: 0,
+        });
       }
     }
   }
-  console.log(`  ✓ Slots created (4/day × 21 days × 2 centers)`);
+
+  const createdSlots = await Slot.insertMany(slotsToCreate);
+  console.log(`  ✓ Created ${createdSlots.length} slots across 2 centers`);
+
+  // Map slots for fast lookup by center and date
+  const slotMap = new Map();
+  for (const s of createdSlots) {
+    const key = `${s.center_id.toString()}_${s.date}`;
+    if (!slotMap.has(key)) slotMap.set(key, []);
+    slotMap.get(key).push(s);
+  }
 
   // ── 4. Farmers & Registrations ───────────────────────────
-  const insertFarmer = db.prepare(`
-    INSERT INTO farmers (name, mobile_number, village, location, language_preference)
-    VALUES (@name, @mobile_number, @village, @location, @language_preference)
-  `);
-  const insertReg = db.prepare(`
-    INSERT INTO crop_registrations (farmer_id, center_id, crop_type, expected_quantity, status, created_at, updated_at)
-    VALUES (@farmer_id, @center_id, @crop_type, @expected_quantity, @status, @created_at, @updated_at)
-  `);
-  const insertToken = db.prepare(`
-    INSERT OR IGNORE INTO tokens (registration_id, slot_id, token_number, actual_quantity)
-    VALUES (@registration_id, @slot_id, @token_number, @actual_quantity)
-  `);
-  const updateSlot = db.prepare(`
-    UPDATE slots SET farmers_assigned_count = farmers_assigned_count + 1,
-                     allocated_quintals = allocated_quintals + ?
-    WHERE id = ?
-  `);
-  const insertPayment = db.prepare(`
-    INSERT OR IGNORE INTO payments (registration_id, amount, status)
-    VALUES (@registration_id, @amount, @status)
-  `);
-  const insertNotif = db.prepare(`
-    INSERT INTO notification_log (farmer_id, registration_id, message, channel)
-    VALUES (@farmer_id, @registration_id, @message, @channel)
-  `);
-
-  // Shuffle status spread so we get a natural distribution
+  const today = dateOffset(0);
   const shuffledStatuses = [...STATUS_SPREAD].sort(() => Math.random() - 0.5);
-
-  // Track token numbers per slot
   const slotTokenCounters = {};
 
   for (let i = 0; i < 80; i++) {
     const name = FARMER_NAMES[i] || `Farmer ${i + 1}`;
     const mobile = indianMobile();
     const village = randomElement(VILLAGES);
-    const centerId = centerIds[i % centerIds.length];
+    const center = createdCenters[i % createdCenters.length];
     const crop = randomElement(CROP_TYPES);
     const quantity = randomBetween(10, 60);
     const finalStatus = shuffledStatuses[i];
     const lang = Math.random() > 0.3 ? 'hi' : 'en';
 
-    // Registration date spread over past 7 days
     const daysAgo = randomBetween(0, 7);
-    const createdDate = dateOffset(-daysAgo);
+    const createdDate = new Date(Date.now() - daysAgo * 86400000);
 
-    const farmerResult = insertFarmer.run({
-      name, mobile_number: mobile, village, location: `${village}, Karnataka`, language_preference: lang,
+    const farmer = await Farmer.create({
+      name,
+      mobile_number: mobile,
+      village,
+      location: `${village}, Karnataka`,
+      language_preference: lang,
+      created_at: createdDate,
     });
-    const farmerId = farmerResult.lastInsertRowid;
 
-    const regResult = insertReg.run({
-      farmer_id: farmerId, center_id: centerId, crop_type: crop,
-      expected_quantity: quantity, status: 'registered',
-      created_at: `${createdDate} 09:00:00`, updated_at: `${createdDate} 09:00:00`,
+    const registration = await CropRegistration.create({
+      farmer_id: farmer._id,
+      center_id: center._id,
+      crop_type: crop,
+      expected_quantity: quantity,
+      status: finalStatus === 'registered' ? 'registered' : finalStatus,
+      registered_via: 'self',
+      created_at: createdDate,
+      updated_at: new Date(),
     });
-    const regId = regResult.lastInsertRowid;
 
-    // For statuses beyond 'registered', assign a slot
     if (finalStatus !== 'registered') {
-      // Pick a slot: past slots for completed, future/today for in-progress
       let slotDate;
       if (['paid', 'payment_processing', 'procured'].includes(finalStatus)) {
-        slotDate = dateOffset(-randomBetween(1, 5)); // past
+        slotDate = dateOffset(-randomBetween(1, 5));
       } else if (finalStatus === 'at_center') {
-        slotDate = today; // today
+        slotDate = today;
       } else {
-        slotDate = dateOffset(randomBetween(1, 7)); // future
+        slotDate = dateOffset(randomBetween(1, 7));
       }
 
-      const availableSlots = db
-        .prepare(`SELECT * FROM slots WHERE center_id = ? AND date = ? ORDER BY start_time`)
-        .all(centerId, slotDate);
-
+      const availableSlots = slotMap.get(`${center._id.toString()}_${slotDate}`) || [];
       if (availableSlots.length > 0) {
         const slot = randomElement(availableSlots);
-        if (!slotTokenCounters[slot.id]) slotTokenCounters[slot.id] = 0;
-        slotTokenCounters[slot.id]++;
-        const tokenNum = slotTokenCounters[slot.id];
+        const slotIdStr = slot._id.toString();
+        if (!slotTokenCounters[slotIdStr]) slotTokenCounters[slotIdStr] = 0;
+        slotTokenCounters[slotIdStr]++;
+        const tokenNum = slotTokenCounters[slotIdStr];
 
-        insertToken.run({
-          registration_id: regId, slot_id: slot.id, token_number: tokenNum,
+        await Token.create({
+          registration_id: registration._id,
+          slot_id: slot._id,
+          token_number: tokenNum,
           actual_quantity: ['procured', 'payment_processing', 'paid'].includes(finalStatus)
             ? quantity - randomBetween(0, 5) : null,
         });
-        updateSlot.run(quantity, slot.id);
+
+        await Slot.findByIdAndUpdate(slot._id, {
+          $inc: { farmers_assigned_count: 1, allocated_quintals: quantity },
+        });
       }
 
-      // Payment record
       let payStatus = 'pending';
       let amount = null;
-      if (finalStatus === 'paid') { payStatus = 'completed'; amount = quantity * randomBetween(180, 250); }
-      else if (finalStatus === 'payment_processing') { payStatus = 'processing'; amount = quantity * randomBetween(180, 250); }
+      if (finalStatus === 'paid') {
+        payStatus = 'completed';
+        amount = quantity * randomBetween(180, 250);
+      } else if (finalStatus === 'payment_processing') {
+        payStatus = 'processing';
+        amount = quantity * randomBetween(180, 250);
+      }
 
-      insertPayment.run({ registration_id: regId, amount, status: payStatus });
+      await Payment.create({
+        registration_id: registration._id,
+        amount,
+        status: payStatus,
+      });
 
-      // Update registration to final status
-      db.prepare(`UPDATE crop_registrations SET status = ?, updated_at = datetime('now') WHERE id = ?`)
-        .run(finalStatus, regId);
-
-      // Add notification entry
-      insertNotif.run({
-        farmer_id: farmerId, registration_id: regId,
+      await Notification.create({
+        farmer_id: farmer._id,
+        registration_id: registration._id,
         message: `Your registration for ${crop} has been updated to: ${finalStatus.replace(/_/g, ' ')}`,
         channel: 'in-app',
       });
@@ -303,7 +289,7 @@ function seed() {
   }
 
   console.log('  ✓ 80 farmer registrations seeded with realistic status spread');
-  console.log('\n🎉 Seed complete!');
+  console.log('\n🎉 MongoDB Atlas Seed complete!');
   console.log('\nDemo officer credentials:');
   console.log('  Bellary:  officer_bellary / bellary@2026');
   console.log('  Raichur:  officer_raichur / raichur@2026');
@@ -312,6 +298,13 @@ function seed() {
 module.exports = { seed };
 
 if (require.main === module) {
-  seed();
+  seed()
+    .then(() => {
+      console.log('Done!');
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error('Seed error:', err);
+      process.exit(1);
+    });
 }
-

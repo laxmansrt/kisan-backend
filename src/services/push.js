@@ -19,7 +19,7 @@ const url = require('url');
 
 let wss = null;
 
-// Maps: farmerId → Set<WebSocket>,  centerId → Set<WebSocket>
+// Maps: farmerId (string) → Set<WebSocket>,  centerId (string) → Set<WebSocket>
 const farmerConnections = new Map();
 const officerConnections = new Map();
 
@@ -33,7 +33,7 @@ function initWebSocket(httpServer) {
   wss.on('connection', (ws, req) => {
     const params = new url.URL(req.url, 'http://localhost').searchParams;
     const type = params.get('type');
-    const id = parseInt(params.get('id'), 10);
+    const id = params.get('id') ? String(params.get('id')) : null;
     const token = params.get('token');
 
     // Verify JWT
@@ -62,11 +62,12 @@ function initWebSocket(httpServer) {
 
 /**
  * Push a status update to a specific farmer.
- * @param {number} farmerId
+ * @param {string|number} farmerId
  * @param {object} data
  */
 function pushToFarmer(farmerId, data) {
-  const connections = farmerConnections.get(farmerId);
+  const key = String(farmerId);
+  const connections = farmerConnections.get(key);
   if (!connections || connections.size === 0) return;
   const message = JSON.stringify({ type: 'STATUS_UPDATE', data });
   for (const ws of connections) {
@@ -76,11 +77,12 @@ function pushToFarmer(farmerId, data) {
 
 /**
  * Push a queue update to all officers at a center.
- * @param {number} centerId
+ * @param {string|number} centerId
  * @param {object} data
  */
 function pushToCenter(centerId, data) {
-  const connections = officerConnections.get(centerId);
+  const key = String(centerId);
+  const connections = officerConnections.get(key);
   if (!connections || connections.size === 0) return;
   const message = JSON.stringify({ type: 'QUEUE_UPDATE', data });
   for (const ws of connections) {

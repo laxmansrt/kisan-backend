@@ -100,71 +100,86 @@ function generateDateRange(fromDate, days) {
 }
 
 /**
- * High-level slot assigner that reads from and writes to DB.
- * Uses the pure functions above; handles the DB transaction.
+ * High-level slot assigner for Mongoose / MongoDB.
  *
- * @param {import('better-sqlite3').Database} db
- * @param {number} centerId
- * @param {number} registrationId
+ * @param {any} _dbOrCenterId - Can accept centerId directly or (db, centerId...) for backward compat
+ * @param {any} centerId
+ * @param {any} registrationId
  * @param {number} quantity
  * @param {string} fromDate - YYYY-MM-DD
- * @returns {{ slot: Object, tokenNumber: number, payment: Object }}
+ * @returns {Promise<{ slot: Object, token: Object, payment: Object }>}
  */
-function assignSlotInDb(db, centerId, registrationId, quantity, fromDate) {
-  const center = db.prepare('SELECT * FROM centers WHERE id = ?').get(centerId);
-  if (!center) throw new Error(`Center ${centerId} not found`);
+async function assignSlotInDb(_dbOrCenterId, centerId, registrationId, quantity, fromDate) {
+  // Support both (centerId, registrationId, quantity, fromDate) and (db, centerId, registrationId, quantity, fromDate)
+  let actualCenterId = centerId;
+  let actualRegId = registrationId;
+  let actualQty = quantity;
+  let actualFromDate = fromDate;
 
-  const slots = db
-    .prepare(`SELECT * FROM slots WHERE center_id = ? AND date >= ? ORDER BY date, start_time`)
-    .all(centerId, fromDate);
+  if (typeof _dbOrCenterId === 'string' || (typeof _dbOrCenterId === 'object' && _dbOrCenterId?._bsontype)) {
+    actualCenterId = _dbOrCenterId;
+    actualRegId = centerId;
+    actualQty = registrationId;
+    actualFromDate = quantity;
+  }
 
-  const result = findBestSlot(slots, fromDate, quantity, center.daily_capacity_quintals);
+  const Center = require('../models/Center');
+  const Slot = require('../models/Slot');
+  const Token = require('../models/Token');
+  const Payment = require('../models/Payment');
+  const CropRegistration = require('../models/CropRegistration');
+
+  const center = await Center.findById(actualCenterId);
+  if (!center) throw new Error(`Center ${actualCenterId} not found`);
+
+  const slots = await Slot.find({
+    center_id: actualCenterId,
+    date: { $gte: actualFromDate },
+  }).sort({ date: 1, start_time: 1 }).lean();
+
+  const result = findBestSlot(slots, actualFromDate, actualQty, center.daily_capacity_quintals);
   if (!result) {
     throw new Error(
-      `No available slot found within ${SEARCH_WINDOW_DAYS} days for center ${centerId}`
+      `No available slot found within ${SEARCH_WINDOW_DAYS} days for center ${actualCenterId}`
     );
   }
 
   const { slot, tokenNumber } = result;
 
-  // All writes in a single transaction to prevent race conditions
-  const assign = db.transaction(() => {
-    // Update slot counts
-    db.prepare(`
-      UPDATE slots
-      SET farmers_assigned_count = farmers_assigned_count + 1,
-          allocated_quintals = allocated_quintals + ?
-      WHERE id = ?
-    `).run(quantity, slot.id);
+  // Update slot counts atomically
+  const updatedSlot = await Slot.findByIdAndUpdate(
+    slot._id,
+    {
+      $inc: {
+        farmers_assigned_count: 1,
+        allocated_quintals: actualQty,
+      },
+    },
+    { new: true }
+  );
 
-    // Create token record
-    db.prepare(`
-      INSERT INTO tokens (registration_id, slot_id, token_number)
-      VALUES (?, ?, ?)
-    `).run(registrationId, slot.id, tokenNumber);
-
-    // Update registration status to 'scheduled'
-    db.prepare(`
-      UPDATE crop_registrations
-      SET status = 'scheduled', updated_at = datetime('now')
-      WHERE id = ?
-    `).run(registrationId);
-
-    // Create pending payment record
-    db.prepare(`
-      INSERT INTO payments (registration_id, status)
-      VALUES (?, 'pending')
-    `).run(registrationId);
+  // Create token record
+  const token = await Token.create({
+    registration_id: actualRegId,
+    slot_id: slot._id,
+    token_number: tokenNumber,
   });
 
-  assign();
+  // Update registration status to 'scheduled'
+  await CropRegistration.findByIdAndUpdate(actualRegId, {
+    status: 'scheduled',
+  });
 
-  // Return the fresh slot state
-  const updatedSlot = db.prepare('SELECT * FROM slots WHERE id = ?').get(slot.id);
-  const token = db.prepare('SELECT * FROM tokens WHERE registration_id = ?').get(registrationId);
-  const payment = db.prepare('SELECT * FROM payments WHERE registration_id = ?').get(registrationId);
+  // Create or find payment record
+  let payment = await Payment.findOne({ registration_id: actualRegId });
+  if (!payment) {
+    payment = await Payment.create({
+      registration_id: actualRegId,
+      status: 'pending',
+    });
+  }
 
-  return { slot: updatedSlot, token, payment };
+  return { slot: updatedSlot.toJSON(), token: token.toJSON(), payment: payment.toJSON() };
 }
 
 module.exports = { findBestSlot, applyAssignment, generateDateRange, assignSlotInDb };

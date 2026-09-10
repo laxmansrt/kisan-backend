@@ -1,34 +1,33 @@
 'use strict';
-const Database = require('better-sqlite3');
-const path = require('path');
-const fs = require('fs');
+const mongoose = require('mongoose');
 require('dotenv').config();
 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../../data/sih26032.db');
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/sih26032';
 
-// Ensure data directory exists
-const dataDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+let isConnected = false;
+
+async function connectDB() {
+  if (isConnected && mongoose.connection.readyState === 1) {
+    return mongoose.connection;
+  }
+
+  try {
+    const conn = await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 10000,
+    });
+    isConnected = true;
+    const dbName = mongoose.connection.name || 'sih26032';
+    console.log(`🍃 Connected to MongoDB Atlas (${dbName})`);
+    return mongoose.connection;
+  } catch (err) {
+    console.error('❌ MongoDB connection error:', err.message);
+    throw err;
+  }
 }
 
-const db = new Database(DB_PATH);
+// Auto-connect on require
+connectDB().catch(err => {
+  console.error('Failed initial MongoDB connection:', err.message);
+});
 
-// Load and execute schema on first run
-const schemaPath = path.join(__dirname, 'schema.sql');
-const schema = fs.readFileSync(schemaPath, 'utf8');
-db.exec(schema);
-
-// ── Migrations (idempotent — safe to run on every startup) ──────────
-// Add registered_via to existing databases that predate this column
-const cols = db.pragma('table_info(crop_registrations)').map(c => c.name);
-if (!cols.includes('registered_via')) {
-  db.exec(`ALTER TABLE crop_registrations ADD COLUMN registered_via TEXT NOT NULL DEFAULT 'self'`);
-  console.log('✅ Migration: added crop_registrations.registered_via');
-}
-
-// Convenience helpers
-db.pragma('foreign_keys = ON');
-db.pragma('journal_mode = WAL');
-
-module.exports = db;
+module.exports = { mongoose, connectDB };
