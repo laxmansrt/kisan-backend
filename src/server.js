@@ -38,8 +38,9 @@ const PORT = process.env.PORT || 5000;
 const server = http.createServer(app);
 initWebSocket(server);
 
-server.listen(PORT, () => {
-  console.log(`\n🚀 GovProcure API running on http://localhost:${PORT}`);
-  console.log(`   WebSocket:  ws://localhost:${PORT}/ws`);
-  console.log(`   Health:     http://localhost:${PORT}/api/health\n`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`\n🚀 GovProcure API running on http://0.0.0.0:${PORT}`);
+  console.log(`   WebSocket:  ws://0.0.0.0:${PORT}/ws`);
+  console.log(`   Health:     http://0.0.0.0:${PORT}/api/health\n`);
 });
+
