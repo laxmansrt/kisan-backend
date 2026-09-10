@@ -4,12 +4,25 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { initWebSocket } = require('./services/push');
+const db = require('./db/db');
+const { seed } = require('./db/seed');
+
+// Auto-seed database if empty (ensures demo APMC centers & officers exist on first cloud deploy)
+try {
+  const count = db.prepare('SELECT COUNT(*) as count FROM officers').get().count;
+  if (count === 0) {
+    console.log('🌱 Database is empty — running seed...');
+    seed();
+  }
+} catch (e) {
+  console.warn('Auto-seed check error:', e.message);
+}
 
 const app = express();
 
 // ── Middleware ────────────────────────────────────────────
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: process.env.FRONTEND_URL || true,
   credentials: true,
 }));
 app.use(express.json());

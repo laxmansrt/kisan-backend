@@ -309,4 +309,9 @@ function seed() {
   console.log('  Raichur:  officer_raichur / raichur@2026');
 }
 
-seed();
+module.exports = { seed };
+
+if (require.main === module) {
+  seed();
+}
+

@@ -28,9 +28,9 @@ router.post('/farmer/request-otp', (req, res) => {
 
   console.log(`🔑 OTP for ${mobile_number}: ${otp} (expires ${expiresAt})`);
 
-  // In dev mode, return OTP in response for testing
+  // In dev mode or when Twilio is not configured, return OTP in response for demo/testing
   const response = { message: 'OTP sent', expires_in_minutes: 10 };
-  if (process.env.NODE_ENV !== 'production') response.dev_otp = otp;
+  if (process.env.NODE_ENV !== 'production' || !process.env.TWILIO_ACCOUNT_SID) response.dev_otp = otp;
 
   res.json(response);
 });
