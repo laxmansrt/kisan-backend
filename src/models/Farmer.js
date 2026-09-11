@@ -7,6 +7,8 @@ const farmerSchema = new mongoose.Schema({
   village: { type: String },
   location: { type: String },
   language_preference: { type: String, default: 'en' },
+  password_hash: { type: String },
+  pattern_hash: { type: String },
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' },
   toJSON: {

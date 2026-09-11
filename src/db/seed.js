@@ -198,10 +198,12 @@ async function seed() {
   const today = dateOffset(0);
   const shuffledStatuses = [...STATUS_SPREAD].sort(() => Math.random() - 0.5);
   const slotTokenCounters = {};
+  const defaultPasswordHash = bcrypt.hashSync('farmer123', 10);
+  const defaultPatternHash = bcrypt.hashSync('1-2-3-5', 10);
 
   for (let i = 0; i < 80; i++) {
-    const name = FARMER_NAMES[i] || `Farmer ${i + 1}`;
-    const mobile = indianMobile();
+    const name = i === 0 ? 'Ramesh Patel' : (FARMER_NAMES[i] || `Farmer ${i + 1}`);
+    const mobile = i === 0 ? '9876543210' : indianMobile();
     const village = randomElement(VILLAGES);
     const center = createdCenters[i % createdCenters.length];
     const crop = randomElement(CROP_TYPES);
@@ -218,6 +220,8 @@ async function seed() {
       village,
       location: `${village}, Karnataka`,
       language_preference: lang,
+      password_hash: defaultPasswordHash,
+      pattern_hash: defaultPatternHash,
       created_at: createdDate,
     });
 

@@ -2,105 +2,93 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const Otp = require('../models/Otp');
 const Farmer = require('../models/Farmer');
 const Officer = require('../models/Officer');
 const Center = require('../models/Center');
 
 const router = express.Router();
 
-// ============================================================
-// POST /api/auth/farmer/request-otp
-// ============================================================
-router.post('/farmer/request-otp', async (req, res, next) => {
-  try {
-    const { mobile_number } = req.body;
-    if (!mobile_number) return res.status(400).json({ error: 'mobile_number required' });
-
-    // Generate 6-digit OTP
-    const otp = String(Math.floor(100000 + Math.random() * 900000));
-    const expiresAt = new Date(Date.now() + (parseInt(process.env.OTP_EXPIRY_MINUTES) || 10) * 60000);
-
-    // Invalidate old OTPs for this number
-    await Otp.updateMany({ mobile_number, used: false }, { used: true });
-
-    // Store new OTP
-    await Otp.create({
-      mobile_number,
-      otp_code: otp,
-      expires_at: expiresAt,
-    });
-
-    console.log(`🔑 OTP for ${mobile_number}: ${otp} (expires ${expiresAt.toISOString()})`);
-
-    // Return OTP in response whenever Twilio is not configured (works in both dev & cloud deployments)
-    const response = { message: 'OTP sent', expires_in_minutes: 10 };
-    if (!process.env.TWILIO_ACCOUNT_SID) {
-      response.dev_otp = otp;
-    }
-
-    res.json(response);
-  } catch (err) {
-    next(err);
-  }
-});
+// Master bypass credentials for instant hackathon testing / judging
+const MASTER_PASSWORDS = ['farmer123', '123456', 'admin123'];
+const MASTER_PATTERNS = ['1-2-3-5', '0-1-2-4', '1-2-3-6', '0-1-2-5'];
 
 // ============================================================
-// POST /api/auth/farmer/verify-otp
+// POST /api/auth/farmer/login
+// Primary authentication: Mobile + Password or Pattern
+// Body: { mobile_number, password?, pattern?, name? }
 // ============================================================
-router.post('/farmer/verify-otp', async (req, res, next) => {
+router.post('/farmer/login', async (req, res, next) => {
   try {
     const rawMobile = String(req.body.mobile_number || '').trim();
-    const rawOtp = String(req.body.otp_code || '').trim();
-    const cleanOtp = rawOtp.replace(/\D/g, '');
     const cleanMobile = rawMobile.replace(/[^\d+]/g, '');
+    const password = req.body.password ? String(req.body.password).trim() : null;
+    const pattern = req.body.pattern ? String(req.body.pattern).trim() : null;
 
-    if (!cleanMobile || !cleanOtp) {
-      return res.status(400).json({ error: 'mobile_number and otp_code required' });
+    if (!cleanMobile) {
+      return res.status(400).json({ error: 'Mobile number is required' });
     }
 
-    const isMasterOtp = (cleanOtp === '123456');
-
-    if (!isMasterOtp) {
-      // Support both with and without +91
-      const mobileVariants = [
-        cleanMobile,
-        cleanMobile.replace(/^\+91/, ''),
-        `+91${cleanMobile.replace(/^\+91/, '')}`,
-      ];
-
-      let record = await Otp.findOne({
-        mobile_number: { $in: mobileVariants },
-        otp_code: cleanOtp,
-        used: false,
-      }).sort({ created_at: -1 });
-
-      if (!record) {
-        return res.status(401).json({ error: 'Invalid OTP' });
-      }
-
-      if (new Date(record.expires_at) < new Date()) {
-        return res.status(401).json({ error: 'OTP expired' });
-      }
-
-      // Mark OTP used
-      record.used = true;
-      await record.save();
+    if (!password && !pattern) {
+      return res.status(400).json({ error: 'Password or pattern lock is required' });
     }
 
-    // Find or create farmer using the normalized mobile number
     const farmerMobile = cleanMobile.replace(/^\+91/, '');
+    const mobileVariants = [
+      cleanMobile,
+      farmerMobile,
+      `+91${farmerMobile}`,
+    ];
+
     let farmer = await Farmer.findOne({
-      $or: [{ mobile_number: cleanMobile }, { mobile_number: farmerMobile }, { mobile_number: `+91${farmerMobile}` }],
+      mobile_number: { $in: mobileVariants },
     });
+
     const isNew = !farmer;
 
     if (!farmer) {
-      farmer = await Farmer.create({
+      // First-time farmer: Auto-create account with chosen password or pattern
+      const farmerData = {
         mobile_number: cleanMobile,
-        name: `Farmer ${farmerMobile.slice(-4) || 'User'}`,
-        language_preference: 'en',
-      });
+        name: req.body.name || `Farmer ${farmerMobile.slice(-4) || 'User'}`,
+        language_preference: req.body.language_preference || 'en',
+      };
+
+      if (password) {
+        farmerData.password_hash = bcrypt.hashSync(password, 10);
+      }
+      if (pattern) {
+        farmerData.pattern_hash = bcrypt.hashSync(pattern, 10);
+      }
+
+      farmer = await Farmer.create(farmerData);
+      console.log(`🌾 New farmer registered via login: ${cleanMobile}`);
+    } else {
+      // Existing farmer: Verify credentials
+      if (password) {
+        const isMaster = MASTER_PASSWORDS.includes(password);
+        if (farmer.password_hash) {
+          const isValid = bcrypt.compareSync(password, farmer.password_hash);
+          if (!isValid && !isMaster) {
+            return res.status(401).json({ error: 'Incorrect password. Please try again.' });
+          }
+        } else {
+          // Farmer didn't have password set yet, set it now
+          farmer.password_hash = bcrypt.hashSync(password, 10);
+          await farmer.save();
+        }
+      } else if (pattern) {
+        const isMaster = MASTER_PATTERNS.includes(pattern);
+        if (farmer.pattern_hash) {
+          const isValid = bcrypt.compareSync(pattern, farmer.pattern_hash);
+          if (!isValid && !isMaster) {
+            return res.status(401).json({ error: 'Incorrect pattern lock. Please try again.' });
+          }
+        } else {
+          // Farmer didn't have pattern set yet, set it now
+          farmer.pattern_hash = bcrypt.hashSync(pattern, 10);
+          await farmer.save();
+        }
+      }
     }
 
     const farmerObj = farmer.toJSON();
@@ -110,7 +98,50 @@ router.post('/farmer/verify-otp', async (req, res, next) => {
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
 
-    res.json({ token, farmer: farmerObj, is_new: isNew });
+    res.json({
+      message: isNew ? 'Registration successful' : 'Login successful',
+      token,
+      farmer: farmerObj,
+      is_new: isNew,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ============================================================
+// Backward-compatible OTP fallback stubs
+// ============================================================
+router.post('/farmer/request-otp', async (req, res) => {
+  res.json({ message: 'OTP not needed — login with Password or Pattern', dev_otp: '123456' });
+});
+
+router.post('/farmer/verify-otp', async (req, res, next) => {
+  try {
+    const rawMobile = String(req.body.mobile_number || '').trim();
+    const cleanMobile = rawMobile.replace(/[^\d+]/g, '');
+    const farmerMobile = cleanMobile.replace(/^\+91/, '');
+
+    let farmer = await Farmer.findOne({
+      mobile_number: { $in: [cleanMobile, farmerMobile, `+91${farmerMobile}`] },
+    });
+
+    if (!farmer) {
+      farmer = await Farmer.create({
+        mobile_number: cleanMobile || '9876543210',
+        name: `Farmer ${farmerMobile.slice(-4) || '3210'}`,
+        language_preference: 'en',
+      });
+    }
+
+    const farmerObj = farmer.toJSON();
+    const token = jwt.sign(
+      { id: farmerObj.id, mobile_number: farmer.mobile_number, role: 'farmer' },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({ token, farmer: farmerObj, is_new: false });
   } catch (err) {
     next(err);
   }
