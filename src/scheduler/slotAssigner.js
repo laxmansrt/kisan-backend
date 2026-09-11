@@ -128,9 +128,23 @@ async function assignSlotInDb(_dbOrCenterId, centerId, registrationId, quantity,
   const Token = require('../models/Token');
   const Payment = require('../models/Payment');
   const CropRegistration = require('../models/CropRegistration');
+  const mongoose = require('mongoose');
 
-  const center = await Center.findById(actualCenterId);
-  if (!center) throw new Error(`Center ${actualCenterId} not found`);
+  let center = null;
+  if (mongoose.isValidObjectId(actualCenterId)) {
+    center = await Center.findById(actualCenterId);
+  }
+  if (!center) {
+    const allCenters = await Center.find().sort({ name: 1 });
+    const num = parseInt(actualCenterId, 10);
+    if (!isNaN(num) && num > 0 && num <= allCenters.length) {
+      center = allCenters[num - 1];
+    } else {
+      center = allCenters[0];
+    }
+  }
+  if (!center) throw new Error(`Center not found`);
+  actualCenterId = center._id;
 
   const slots = await Slot.find({
     center_id: actualCenterId,

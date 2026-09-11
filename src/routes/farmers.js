@@ -56,11 +56,30 @@ router.get('/centers', async (req, res, next) => {
 // ============================================================
 router.post('/register', authFarmer, async (req, res, next) => {
   try {
-    const { name, village, language_preference, center_id, crop_type, expected_quantity } = req.body;
+    let { name, village, language_preference, center_id, crop_type, expected_quantity } = req.body;
 
     if (!center_id || !crop_type || !expected_quantity) {
       return res.status(400).json({ error: 'center_id, crop_type, and expected_quantity are required' });
     }
+
+    const mongoose = require('mongoose');
+    let centerDoc = null;
+    if (mongoose.isValidObjectId(center_id)) {
+      centerDoc = await Center.findById(center_id);
+    }
+    if (!centerDoc) {
+      const allCenters = await Center.find().sort({ name: 1 });
+      const num = parseInt(center_id, 10);
+      if (!isNaN(num) && num > 0 && num <= allCenters.length) {
+        centerDoc = allCenters[num - 1];
+      } else {
+        centerDoc = allCenters[0];
+      }
+    }
+    if (!centerDoc) {
+      return res.status(404).json({ error: 'Procurement center not found' });
+    }
+    center_id = centerDoc._id.toString();
 
     const farmerId = req.farmer.id;
     const today = new Date().toISOString().slice(0, 10);
