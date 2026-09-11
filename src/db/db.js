@@ -13,9 +13,7 @@ async function connectDB() {
 
   try {
     const conn = await mongoose.connect(MONGODB_URI, {
-      serverSelectionTimeoutMS: 15000,
-      connectTimeoutMS: 15000,
-      family: 4,
+      serverSelectionTimeoutMS: 20000,
     });
     isConnected = true;
     const dbName = mongoose.connection.name || 'sih26032';
