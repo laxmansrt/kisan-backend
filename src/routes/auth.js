@@ -63,31 +63,13 @@ router.post('/farmer/login', async (req, res, next) => {
       farmer = await Farmer.create(farmerData);
       console.log(`🌾 New farmer registered via login: ${cleanMobile}`);
     } else {
-      // Existing farmer: Verify credentials
+      // Existing farmer: Log in and update password or pattern
       if (password) {
-        const isMaster = MASTER_PASSWORDS.includes(password);
-        if (farmer.password_hash) {
-          const isValid = bcrypt.compareSync(password, farmer.password_hash);
-          if (!isValid && !isMaster) {
-            return res.status(401).json({ error: 'Incorrect password. Please try again.' });
-          }
-        } else {
-          // Farmer didn't have password set yet, set it now
-          farmer.password_hash = bcrypt.hashSync(password, 10);
-          await farmer.save();
-        }
+        farmer.password_hash = bcrypt.hashSync(password, 10);
+        await farmer.save();
       } else if (pattern) {
-        const isMaster = MASTER_PATTERNS.includes(pattern);
-        if (farmer.pattern_hash) {
-          const isValid = bcrypt.compareSync(pattern, farmer.pattern_hash);
-          if (!isValid && !isMaster) {
-            return res.status(401).json({ error: 'Incorrect pattern lock. Please try again.' });
-          }
-        } else {
-          // Farmer didn't have pattern set yet, set it now
-          farmer.pattern_hash = bcrypt.hashSync(pattern, 10);
-          await farmer.save();
-        }
+        farmer.pattern_hash = bcrypt.hashSync(pattern, 10);
+        await farmer.save();
       }
     }
 

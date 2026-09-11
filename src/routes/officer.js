@@ -473,20 +473,7 @@ router.post('/assisted-register', async (req, res, next) => {
       }
     }
 
-    // Block if farmer already has an active registration
-    const existing = await CropRegistration.findOne({
-      farmer_id: farmer._id,
-      status: { $nin: ['paid', 'cancelled', 'rejected'] },
-    }).sort({ created_at: -1 });
-
-    if (existing) {
-      return res.status(409).json({
-        error: 'This farmer already has an active registration. Complete or pay the existing one first.',
-        existing_registration_id: existing.id || existing._id.toString(),
-      });
-    }
-
-    // Create registration
+    // Multiple crop registrations permitted
     const registration = await CropRegistration.create({
       farmer_id: farmer._id,
       center_id,

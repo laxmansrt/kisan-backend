@@ -94,20 +94,7 @@ router.post('/register', authFarmer, async (req, res, next) => {
       await Farmer.findByIdAndUpdate(farmerId, farmerUpdates);
     }
 
-    // Check for an existing active registration (prevent duplicates)
-    const existing = await CropRegistration.findOne({
-      farmer_id: farmerId,
-      status: { $nin: ['paid', 'cancelled', 'rejected'] },
-    }).sort({ created_at: -1 });
-
-    if (existing) {
-      return res.status(409).json({
-        error: 'You already have an active registration. Complete or pay the existing one first.',
-        existing_registration_id: existing.id || existing._id.toString(),
-      });
-    }
-
-    // Create the registration
+    // Multiple registrations permitted: create new crop registration
     const registrationDoc = await CropRegistration.create({
       farmer_id: farmerId,
       center_id,
@@ -179,46 +166,59 @@ router.get('/:id/status', authFarmer, async (req, res, next) => {
     const farmer = await Farmer.findById(farmerId);
     if (!farmer) return res.status(404).json({ error: 'Farmer not found' });
 
-    // Get most recent active registration
-    const registrationDoc = await CropRegistration.findOne({ farmer_id: farmerId })
+    // Get all registrations for this farmer
+    const allRegistrationDocs = await CropRegistration.find({ farmer_id: farmerId })
       .populate('center_id')
       .sort({ created_at: -1 });
 
-    if (!registrationDoc) {
+    if (allRegistrationDocs.length === 0) {
       return res.json({
         farmer: farmer.toJSON(),
         registration: null,
         token: null,
         slot: null,
         payment: null,
+        all_registrations: [],
         notifications: [],
       });
     }
 
-    const reg = registrationDoc.toJSON();
-    if (registrationDoc.center_id) {
-      reg.center_name = registrationDoc.center_id.name;
-      reg.center_location = registrationDoc.center_id.location;
-      reg.center_address = registrationDoc.center_id.address;
-      reg.center_contact = registrationDoc.center_id.contact_number;
-    }
+    const allRegistrations = await Promise.all(
+      allRegistrationDocs.map(async (doc) => {
+        const reg = doc.toJSON();
+        if (doc.center_id) {
+          reg.center_name = doc.center_id.name;
+          reg.center_location = doc.center_id.location;
+          reg.center_address = doc.center_id.address;
+          reg.center_contact = doc.center_id.contact_number;
+        }
 
-    const tokenDoc = await Token.findOne({ registration_id: registrationDoc._id }).populate('slot_id');
-    let token = null;
-    let slot = null;
+        const tokenDoc = await Token.findOne({ registration_id: doc._id }).populate('slot_id');
+        let token = null;
+        let slot = null;
+        if (tokenDoc) {
+          token = tokenDoc.toJSON();
+          if (tokenDoc.slot_id) {
+            token.date = tokenDoc.slot_id.date;
+            token.start_time = tokenDoc.slot_id.start_time;
+            token.end_time = tokenDoc.slot_id.end_time;
+            slot = tokenDoc.slot_id.toJSON();
+          }
+        }
 
-    if (tokenDoc) {
-      token = tokenDoc.toJSON();
-      if (tokenDoc.slot_id) {
-        token.date = tokenDoc.slot_id.date;
-        token.start_time = tokenDoc.slot_id.start_time;
-        token.end_time = tokenDoc.slot_id.end_time;
-        slot = tokenDoc.slot_id.toJSON();
-      }
-    }
+        const paymentDoc = await Payment.findOne({ registration_id: doc._id });
+        const payment = paymentDoc ? paymentDoc.toJSON() : null;
 
-    const paymentDoc = await Payment.findOne({ registration_id: registrationDoc._id });
-    const payment = paymentDoc ? paymentDoc.toJSON() : null;
+        return {
+          registration: reg,
+          token,
+          slot: slot || token,
+          payment,
+        };
+      })
+    );
+
+    const primary = allRegistrations[0];
 
     const notifications = await Notification.find({ farmer_id: farmerId })
       .sort({ created_at: -1 })
@@ -227,10 +227,11 @@ router.get('/:id/status', authFarmer, async (req, res, next) => {
 
     res.json({
       farmer: farmer.toJSON(),
-      registration: reg,
-      token,
-      slot: slot || token,
-      payment,
+      registration: primary.registration,
+      token: primary.token,
+      slot: primary.slot,
+      payment: primary.payment,
+      all_registrations: allRegistrations,
       notifications: notifications.map(n => ({ ...n, id: n._id.toString() })),
     });
   } catch (err) {
